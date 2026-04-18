@@ -243,55 +243,6 @@ body {
   color: var(--neon);
 }
 
-.sanctum-add-custom {
-  margin-top: 0.5rem;
-  width: 100%;
-  padding: 0.55rem 0.5rem;
-  font-family: inherit;
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  color: var(--neon);
-  background: transparent;
-  border: 1px solid var(--neon-dim);
-  border-radius: 4px;
-  cursor: pointer;
-  transition:
-    background 0.15s ease,
-    border-color 0.15s ease;
-}
-
-.sanctum-add-custom:hover {
-  background: rgba(193, 255, 114, 0.08);
-  border-color: var(--neon);
-}
-
-.sanctum-sidebar-foot {
-  margin-top: auto;
-  padding-top: 1rem;
-}
-
-.sanctum-settings {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-  background: none;
-  border: none;
-  color: var(--text-dim);
-  font-family: inherit;
-  font-size: 0.65rem;
-  letter-spacing: 0.06em;
-  cursor: pointer;
-  padding: 0.25rem 0.35rem;
-}
-
-.sanctum-settings:hover {
-  color: var(--text);
-}
-
-.sanctum-settings-ico {
-  font-size: 0.85rem;
-}
 
 /* —— Main —— */
 .sanctum-main {
@@ -827,15 +778,6 @@ body {
 
   .sanctum-algo-item {
     margin-bottom: 0;
-  }
-
-  .sanctum-add-custom {
-    flex: 1 1 140px;
-  }
-
-  .sanctum-sidebar-foot {
-    width: 100%;
-    margin-top: 0.5rem;
   }
 
   .sanctum-bottom-io {

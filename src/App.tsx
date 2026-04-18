@@ -583,17 +583,6 @@ export default function App() {
               )
             })}
           </ul>
-          <button type="button" className="sanctum-add-custom" onClick={() => addCipher('reverse')}>
-            ADD CUSTOM NODE
-          </button>
-          <div className="sanctum-sidebar-foot">
-            <button type="button" className="sanctum-settings">
-              <span className="sanctum-settings-ico" aria-hidden>
-                ⚙
-              </span>
-              Settings
-            </button>
-          </div>
         </aside>
 
         <main className="sanctum-main">
