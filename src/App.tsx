@@ -1032,6 +1032,19 @@ export default function App() {
             <div className="sanctum-io-actions">
               <button
                 type="button"
+                className="sanctum-pill sanctum-pill--encrypt"
+                onClick={() => {
+                  if (validationHint) {
+                    setRunError(validationHint)
+                    return
+                  }
+                  applyEncryptRun()
+                }}
+              >
+                ENCRYPT
+              </button>
+              <button
+                type="button"
                 className="sanctum-pill sanctum-pill--decrypt"
                 onClick={() => {
                   if (validationHint) {
@@ -1047,19 +1060,6 @@ export default function App() {
                 }}
               >
                 DECRYPT
-              </button>
-              <button
-                type="button"
-                className="sanctum-pill sanctum-pill--encrypt"
-                onClick={() => {
-                  if (validationHint) {
-                    setRunError(validationHint)
-                    return
-                  }
-                  applyEncryptRun()
-                }}
-              >
-                ENCRYPT
               </button>
             </div>
 
