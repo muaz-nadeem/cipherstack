@@ -88,7 +88,22 @@ function swapAdjacentPipelineSlots(copy: PipelineCanvasNode[], left: number, rig
   copy[right] = { ...a, x: bx, y: by }
 }
 
+/** Single-row layout: forward = encrypt order left→right; reverse = decrypt view (last node left). */
+function layoutNodesRow(nodes: PipelineCanvasNode[], order: 'forward' | 'reverse'): PipelineCanvasNode[] {
+  const len = nodes.length
+  if (len === 0) return nodes
+  return nodes.map((node, pipelineIdx) => {
+    const col = order === 'forward' ? pipelineIdx : len - 1 - pipelineIdx
+    return {
+      ...node,
+      x: SPAWN_X0 + col * (NODE_W + NODE_H_GAP),
+      y: SPAWN_Y0,
+    }
+  })
+}
+
 type Mode = 'encrypt' | 'decrypt'
+type CanvasFlow = 'forward' | 'reverse'
 
 type DragState = { id: string; offsetX: number; offsetY: number }
 
@@ -138,8 +153,10 @@ export default function App() {
   const canvasRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const nodeHeightsRef = useRef<Record<string, number>>({})
+  const canvasFlowRef = useRef<CanvasFlow>('forward')
   const [nodeHeights, setNodeHeights] = useState<Record<string, number>>({})
   const [nodes, setNodes] = useState<PipelineCanvasNode[]>([])
+  const [canvasFlow, setCanvasFlow] = useState<CanvasFlow>('forward')
   const [mode, setMode] = useState<Mode>('encrypt')
   const [plaintext, setPlaintext] = useState('hello')
   const [ciphertext, setCiphertext] = useState('')
@@ -155,6 +172,10 @@ export default function App() {
   const [copyFlash, setCopyFlash] = useState(false)
 
   const pipeline = useMemo(() => toPipeline(nodes), [nodes])
+
+  useEffect(() => {
+    canvasFlowRef.current = canvasFlow
+  }, [canvasFlow])
 
   const clearOutputs = useCallback(() => {
     setTraceByNodeId({})
@@ -176,7 +197,8 @@ export default function App() {
           canvasRef.current?.clientWidth ??
           (typeof window !== 'undefined' ? window.innerWidth - 280 : 1200)
         const pos = spawnPosition(prev, innerW, nodeHeightsRef.current)
-        return [...prev, { id: newId(), cipherId, config: cloneConfig(cipherId), ...pos }]
+        const next = [...prev, { id: newId(), cipherId, config: cloneConfig(cipherId), ...pos }]
+        return layoutNodesRow(next, canvasFlowRef.current)
       })
       clearOutputs()
     },
@@ -185,7 +207,10 @@ export default function App() {
 
   const removeNode = useCallback(
     (id: string) => {
-      setNodes((prev) => prev.filter((n) => n.id !== id))
+      setNodes((prev) => layoutNodesRow(
+        prev.filter((n) => n.id !== id),
+        canvasFlowRef.current,
+      ))
       clearOutputs()
     },
     [clearOutputs],
@@ -203,7 +228,7 @@ export default function App() {
         if (j >= prev.length) return prev
         const copy = [...prev]
         swapAdjacentPipelineSlots(copy, index, j)
-        return copy
+        return layoutNodesRow(copy, canvasFlowRef.current)
       })
       clearOutputs()
     },
@@ -222,7 +247,7 @@ export default function App() {
         if (j < 0) return prev
         const copy = [...prev]
         swapAdjacentPipelineSlots(copy, j, index)
-        return copy
+        return layoutNodesRow(copy, canvasFlowRef.current)
       })
       clearOutputs()
     },
@@ -355,6 +380,8 @@ export default function App() {
     setTraceByNodeId(map)
     setFinalOut(res.finalOutput)
     setCiphertext(res.finalOutput)
+    setCanvasFlow('forward')
+    setNodes((prev) => layoutNodesRow(prev, 'forward'))
   }, [pipeline, plaintext])
 
   const applyDecryptRun = useCallback(
@@ -380,6 +407,8 @@ export default function App() {
       setFinalOut(res.finalOutput)
       setPlaintext(res.finalOutput)
       setCiphertext(input)
+      setCanvasFlow('reverse')
+      setNodes((prev) => layoutNodesRow(prev, 'reverse'))
     },
     [pipeline, ciphertext],
   )
@@ -400,21 +429,38 @@ export default function App() {
 
   const edgeSegments = useMemo(() => {
     const out: { x1: number; y1: number; x2: number; y2: number; key: string }[] = []
-    for (let i = 0; i < nodes.length - 1; i++) {
-      const a = nodes[i]!
-      const b = nodes[i + 1]!
-      const ha = nodeHeights[a.id] ?? NODE_H_FALLBACK
-      const hb = nodeHeights[b.id] ?? NODE_H_FALLBACK
-      out.push({
-        key: `${a.id}-${b.id}`,
-        x1: a.x + NODE_W,
-        y1: a.y + ha / 2,
-        x2: b.x,
-        y2: b.y + hb / 2,
-      })
+    if (nodes.length < 2) return out
+    if (canvasFlow === 'forward') {
+      for (let i = 0; i < nodes.length - 1; i++) {
+        const a = nodes[i]!
+        const b = nodes[i + 1]!
+        const ha = nodeHeights[a.id] ?? NODE_H_FALLBACK
+        const hb = nodeHeights[b.id] ?? NODE_H_FALLBACK
+        out.push({
+          key: `${a.id}-${b.id}`,
+          x1: a.x + NODE_W,
+          y1: a.y + ha / 2,
+          x2: b.x,
+          y2: b.y + hb / 2,
+        })
+      }
+    } else {
+      for (let k = 0; k < nodes.length - 1; k++) {
+        const a = nodes[nodes.length - 1 - k]!
+        const b = nodes[nodes.length - 2 - k]!
+        const ha = nodeHeights[a.id] ?? NODE_H_FALLBACK
+        const hb = nodeHeights[b.id] ?? NODE_H_FALLBACK
+        out.push({
+          key: `${a.id}-${b.id}`,
+          x1: a.x + NODE_W,
+          y1: a.y + ha / 2,
+          x2: b.x,
+          y2: b.y + hb / 2,
+        })
+      }
     }
     return out
-  }, [nodes, nodeHeights])
+  }, [nodes, nodeHeights, canvasFlow])
 
   const canvasExtent = useMemo(() => {
     if (nodes.length === 0) {
@@ -436,8 +482,15 @@ export default function App() {
       const d = getCipher(n.cipherId)
       return d ? d.label.toUpperCase() : n.cipherId.toUpperCase()
     })
-    return `SEQUENCE: ${labels.join(' → ')}`
-  }, [nodes])
+    const ordered = canvasFlow === 'reverse' ? [...labels].reverse() : labels
+    return `SEQUENCE: ${ordered.join(' → ')}`
+  }, [nodes, canvasFlow])
+
+  /** Left→right on canvas; reverse flow shows decrypt order (last pipeline node first). */
+  const visualNodes = useMemo(() => {
+    if (nodes.length === 0) return []
+    return canvasFlow === 'reverse' ? [...nodes].reverse() : [...nodes]
+  }, [nodes, canvasFlow])
 
   const newPipeline = useCallback(() => {
     setNodes([])
@@ -448,6 +501,7 @@ export default function App() {
     setRunError(null)
     setStale(false)
     setMode('encrypt')
+    setCanvasFlow('forward')
   }, [])
 
   const exportPipeline = useCallback(() => {
@@ -525,7 +579,8 @@ export default function App() {
         const pos = spawnPosition(next, innerW, {})
         next.push({ id: newId(), cipherId, config, ...pos })
       }
-      setNodes(next)
+      setCanvasFlow('forward')
+      setNodes(layoutNodesRow(next, 'forward'))
       setSelectedSidebarCipherId(next[0]!.cipherId)
       clearOutputs()
       setRunError(null)
@@ -685,15 +740,19 @@ export default function App() {
                 <div className="sanctum-canvas-empty">Choose a node from Node Library — nodes appear here.</div>
               )}
 
-              {nodes.map((n, i) => {
+              {visualNodes.map((n, vi) => {
+                const pipelineIdx = canvasFlow === 'reverse' ? nodes.length - 1 - vi : vi
                 const def = getCipher(n.cipherId)
                 if (!def) return null
                 const step = traceByNodeId[n.id]
                 const isDragging = drag?.id === n.id
-                const isLast = i === nodes.length - 1
-                const accent = nodeAccentClass(i)
+                const isFinalReadout =
+                  canvasFlow === 'forward'
+                    ? pipelineIdx === nodes.length - 1
+                    : pipelineIdx === 0
+                const accent = nodeAccentClass(pipelineIdx)
                 const outLabel =
-                  def.id === 'xor_b64' ? 'HEX' : isLast ? 'FINAL' : 'OUT'
+                  def.id === 'xor_b64' ? 'HEX' : isFinalReadout ? 'FINAL' : 'OUT'
                 const secondReadout =
                   def.id === 'xor_b64' && step
                     ? xorOutputHex(step.output)
@@ -713,7 +772,9 @@ export default function App() {
                       onPointerDown={(e) => beginDrag(e, n)}
                       title="Drag header to reposition"
                     >
-                      <span className="sanctum-node-idx">NODE {(i + 1).toString().padStart(2, '0')}</span>
+                      <span className="sanctum-node-idx">
+                        NODE {(pipelineIdx + 1).toString().padStart(2, '0')}
+                      </span>
                       <span className="sanctum-node-name">{def.label.toUpperCase()}</span>
                       <button
                         type="button"
@@ -728,10 +789,18 @@ export default function App() {
                       </button>
                     </div>
                     <div className="sanctum-node-reorder">
-                      <button type="button" className="sanctum-mini-btn" onClick={() => swapWithPreviousInPipeline(i)}>
+                      <button
+                        type="button"
+                        className="sanctum-mini-btn"
+                        onClick={() => swapWithPreviousInPipeline(pipelineIdx)}
+                      >
                         ← SWAP
                       </button>
-                      <button type="button" className="sanctum-mini-btn" onClick={() => swapWithNextInPipeline(i)}>
+                      <button
+                        type="button"
+                        className="sanctum-mini-btn"
+                        onClick={() => swapWithNextInPipeline(pipelineIdx)}
+                      >
                         SWAP →
                       </button>
                     </div>
