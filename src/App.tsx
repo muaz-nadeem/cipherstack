@@ -14,6 +14,7 @@ const NODE_W = 300
 const NODE_H_FALLBACK = 220
 const CANVAS_PAD = 48
 const CANVAS_MIN_H = 380
+const MAX_IMPORT_NODES = 40
 const SPAWN_X0 = 40
 const SPAWN_Y0 = 72
 const NODE_H_GAP = 36
@@ -24,6 +25,9 @@ const NODE_LIBRARY_DISPLAY: Partial<Record<string, string>> = {
   xor_b64: 'XOR',
   utf8_b64: 'Base64',
   reverse: 'Reverse',
+  rail_fence: 'Rail Fence',
+  columnar: 'Columnar',
+  affine: 'Affine',
 }
 
 const SIDEBAR_ROWS: { display: string; cipherId: string }[] = cipherListOrdered.map((c) => ({
@@ -118,6 +122,16 @@ function xorOutputHex(s: string): string {
 function randomSessionId(): string {
   const part = () => Math.floor(1000 + Math.random() * 9000)
   return `${part()}-X99-LAB`
+}
+
+function toBool(v: unknown, fallback = false): boolean {
+  if (typeof v === 'boolean') return v
+  if (typeof v === 'string') {
+    const s = v.trim().toLowerCase()
+    if (s === 'true' || s === '1' || s === 'yes') return true
+    if (s === 'false' || s === '0' || s === 'no') return false
+  }
+  return fallback
 }
 
 export default function App() {
@@ -439,6 +453,7 @@ export default function App() {
   const exportPipeline = useCallback(() => {
     const payload = {
       version: 1,
+      exportedAt: new Date().toISOString(),
       nodes: pipeline.map(({ cipherId, config }) => ({ cipherId, config: structuredClone(config) })),
     }
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
@@ -459,36 +474,59 @@ export default function App() {
         setRunError('Import failed: invalid JSON.')
         return
       }
-      if (!parsed || typeof parsed !== 'object' || !('nodes' in parsed)) {
-        setRunError('Import failed: expected a { nodes: [...] } object.')
-        return
-      }
-      const rawNodes = (parsed as { nodes: unknown }).nodes
+      const rawNodes = Array.isArray(parsed)
+        ? parsed
+        : parsed && typeof parsed === 'object' && 'nodes' in parsed
+          ? (parsed as { nodes: unknown }).nodes
+          : null
+
       if (!Array.isArray(rawNodes) || rawNodes.length === 0) {
         setRunError('Import failed: nodes must be a non-empty array.')
+        return
+      }
+      if (rawNodes.length > MAX_IMPORT_NODES) {
+        setRunError(`Import failed: max ${MAX_IMPORT_NODES} nodes allowed (got ${rawNodes.length}).`)
         return
       }
       const innerW =
         canvasRef.current?.clientWidth ?? (typeof window !== 'undefined' ? window.innerWidth - 280 : 1200)
       const next: PipelineCanvasNode[] = []
-      for (const item of rawNodes) {
+      for (let i = 0; i < rawNodes.length; i++) {
+        const item = rawNodes[i]
         if (!item || typeof item !== 'object' || !('cipherId' in item)) {
-          setRunError('Import failed: each node needs cipherId.')
+          setRunError(`Import failed at node ${i + 1}: each node needs cipherId.`)
           return
         }
         const cipherId = String((item as { cipherId: unknown }).cipherId)
-        if (!getCipher(cipherId)) {
-          setRunError(`Import failed: unknown cipher “${cipherId}”.`)
+        const def = getCipher(cipherId)
+        if (!def) {
+          setRunError(`Import failed at node ${i + 1}: unknown cipher “${cipherId}”.`)
           return
         }
-        const config =
+        if (
+          'config' in item &&
+          (item as { config: unknown }).config !== undefined &&
+          ((item as { config: unknown }).config === null ||
+            Array.isArray((item as { config: unknown }).config))
+        ) {
+          setRunError(`Import failed at node ${i + 1}: config must be an object.`)
+          return
+        }
+        const importedConfig =
           'config' in item && (item as { config: unknown }).config && typeof (item as { config: unknown }).config === 'object'
             ? structuredClone((item as { config: CipherConfig }).config)
-            : cloneConfig(cipherId)
+            : {}
+        const config = { ...cloneConfig(cipherId), ...importedConfig }
+        const issues = def.validateConfig(config)
+        if (issues.length > 0) {
+          setRunError(`Import failed at node ${i + 1}: ${issues[0]!.message}`)
+          return
+        }
         const pos = spawnPosition(next, innerW, {})
         next.push({ id: newId(), cipherId, config, ...pos })
       }
       setNodes(next)
+      setSelectedSidebarCipherId(next[0]!.cipherId)
       clearOutputs()
       setRunError(null)
     },
@@ -500,9 +538,18 @@ export default function App() {
       const file = e.target.files?.[0]
       e.target.value = ''
       if (!file) return
+      if (file.size > 512 * 1024) {
+        setRunError('Import failed: file too large (max 512KB).')
+        return
+      }
       const reader = new FileReader()
+      reader.onerror = () => setRunError('Import failed: could not read file.')
       reader.onload = () => {
         const t = typeof reader.result === 'string' ? reader.result : ''
+        if (t.trim() === '') {
+          setRunError('Import failed: file is empty.')
+          return
+        }
         importPipelineFromJson(t)
       }
       reader.readAsText(file)
@@ -729,6 +776,83 @@ export default function App() {
                               onChange={(e) => updateConfig(n.id, { key: e.target.value })}
                             />
                           </div>
+                        )}
+                        {def.id === 'affine' && (
+                          <div className="sanctum-field">
+                            <label htmlFor={`${n.id}-a`}>PARAM A (COPRIME 26)</label>
+                            <div className="sanctum-field-row">
+                              <input
+                                id={`${n.id}-a`}
+                                type="number"
+                                value={String(n.config.a ?? '')}
+                                onChange={(e) =>
+                                  updateConfig(n.id, {
+                                    a: e.target.value === '' ? '' : Number(e.target.value),
+                                  })
+                                }
+                              />
+                              <input
+                                id={`${n.id}-b`}
+                                type="number"
+                                value={String(n.config.b ?? '')}
+                                onChange={(e) =>
+                                  updateConfig(n.id, {
+                                    b: e.target.value === '' ? '' : Number(e.target.value),
+                                  })
+                                }
+                              />
+                            </div>
+                          </div>
+                        )}
+                        {def.id === 'rail_fence' && (
+                          <div className="sanctum-field">
+                            <label htmlFor={`${n.id}-rails`}>RAILS / START DIRECTION</label>
+                            <div className="sanctum-field-row">
+                              <input
+                                id={`${n.id}-rails`}
+                                type="number"
+                                min={2}
+                                max={12}
+                                value={String(n.config.rails ?? '')}
+                                onChange={(e) =>
+                                  updateConfig(n.id, {
+                                    rails: e.target.value === '' ? '' : Number(e.target.value),
+                                  })
+                                }
+                              />
+                              <label className="sanctum-check">
+                                <input
+                                  type="checkbox"
+                                  checked={toBool(n.config.startDown, true)}
+                                  onChange={(e) => updateConfig(n.id, { startDown: e.target.checked })}
+                                />
+                                top-down
+                              </label>
+                            </div>
+                          </div>
+                        )}
+                        {def.id === 'columnar' && (
+                          <>
+                            <div className="sanctum-field">
+                              <label htmlFor={`${n.id}-col-kw`}>COLUMN KEYWORD</label>
+                              <input
+                                id={`${n.id}-col-kw`}
+                                type="text"
+                                value={String(n.config.keyword ?? '')}
+                                onChange={(e) => updateConfig(n.id, { keyword: e.target.value })}
+                              />
+                            </div>
+                            <div className="sanctum-field">
+                              <label htmlFor={`${n.id}-pad`}>PAD CHAR (ENCRYPT)</label>
+                              <input
+                                id={`${n.id}-pad`}
+                                type="text"
+                                maxLength={1}
+                                value={String(n.config.padChar ?? '')}
+                                onChange={(e) => updateConfig(n.id, { padChar: e.target.value.slice(0, 1) })}
+                              />
+                            </div>
+                          </>
                         )}
                       </div>
                       <div className="sanctum-node-io">

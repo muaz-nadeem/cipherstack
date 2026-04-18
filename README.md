@@ -1,54 +1,30 @@
 # CipherStack
 
-Node-based **cascade encryption** UI for the Vyro hackathon (CipherStack / CipherStack problem). Users build a **linear pipeline** of at least **three** cipher nodes, configure each instance, **reorder** or **insert** nodes, then **encrypt** or **decrypt** while viewing **per-node input and output**.
+Cascading cipher playground for the Vyro hackathon. Build a pipeline of cipher nodes, configure each node, then run encrypt/decrypt and inspect intermediate results.
 
-## Tech stack
+## Why this tech stack
 
-- [Vite](https://vitejs.dev/) + [React 19](https://react.dev/) + [TypeScript](https://www.typescriptlang.org/)
-- Pure cipher logic in `src/ciphers/` and `src/lib/` (easy to unit test)
-- [Vitest](https://vitest.dev/) for round-trip and pipeline tests
+- **React + TypeScript**: fast UI iteration with type safety for cipher configs and node state.
+- **Vite**: quick local dev startup and simple static production build.
+- **Vitest**: lightweight unit tests for cipher round-trips and pipeline behavior.
+- **Modular cipher layer** (`src/ciphers/`, `src/lib/`): keeps encryption logic isolated from UI so it stays easy to test and extend.
 
-## Cipher behavior (design notes)
-
-- **Caesar** — shifts **A–Z** and **a–z** only; other characters unchanged. `shift` is an integer (decrypt uses the inverse shift).
-- **Vigenère** — classic tabula recta on letters only; non-letters pass through and **do not** advance the key index. Keyword must contain at least one letter (non-letters in the keyword are stripped).
-- **XOR (UTF-8 → Base64)** — UTF-8 encodes the incoming string, XORs with a **repeating UTF-8 key**, outputs **standard Base64**. Decrypt decodes Base64 then XORs with the same key and UTF-8 decodes. This keeps the pipeline as a string chain even after binary mixing.
-- **Extras** (do not count toward the “3 configurable types” rule): **Reverse string**, **Base64 (UTF-8)** encode/decode as separate node types.
-
-## Requirements checklist
-
-| Requirement | How it is met |
-|---------------|----------------|
-| ≥ 3 **configurable** cipher **types** in the library | Caesar, Vigenère, XOR (extras labeled separately). |
-| Pipeline needs **≥ 3 nodes** to run | Run is disabled until the pipeline validates; executor enforces the same minimum. |
-| Encrypt forward + **decrypt in reverse** with inverses | `runForward` / `runBackward` in `src/lib/executor.ts`. |
-| Intermediate I/O per node | After each run, each card shows last **input/output** for that node. |
-| README + run instructions | This file. |
-
-## Scripts (PowerShell)
+## Run locally (PowerShell)
 
 ```powershell
-cd D:\vyro-hackathon-cursor   # or your clone path
+cd D:\vyro-hackathon-cursor
 npm install
-npm run dev      # development server
-npm run build    # typecheck + production bundle to dist/
-npm run preview  # serve dist locally
-npm run test     # Vitest
+npm run dev
 ```
 
-## Deploy
+## Other useful scripts (PowerShell)
 
-The app is static after `npm run build`.
+```powershell
+npm run test
+npm run build
+npm run preview
+```
 
-- **Vercel / Cloudflare Pages:** set build command `npm run build` and output directory `dist`.
-
-After the first deploy, set your live URL in the repo description and replace the line below.
+## Deployed URL
 
 **Deployed URL:** https://cipherstack-xi.vercel.app
-
-## Project layout
-
-- `src/ciphers/` — cipher definitions + `registry.ts`
-- `src/lib/executor.ts` — pipeline runner and `MIN_PIPELINE_NODES`
-- `src/App.tsx` — UI (palette, pipeline, I/O panel)
-- `src/ciphers/ciphers.test.ts` — round-trip tests

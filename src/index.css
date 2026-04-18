@@ -542,6 +542,21 @@ body {
   flex: 1;
 }
 
+.sanctum-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  color: var(--text-dim);
+  font-size: 0.6rem;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.sanctum-check input {
+  width: 0.8rem;
+  height: 0.8rem;
+}
+
 .sanctum-hex-tag {
   font-size: 0.65rem;
   font-weight: 700;
