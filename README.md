@@ -40,12 +40,11 @@ npm run test     # Vitest
 
 The app is static after `npm run build`.
 
-- **Netlify:** this repo includes [`netlify.toml`](netlify.toml) (`publish = dist`). Connect the Git repo in the Netlify UI and deploy.
 - **Vercel / Cloudflare Pages:** set build command `npm run build` and output directory `dist`.
 
 After the first deploy, set your live URL in the repo description and replace the line below.
 
-**Deployed URL:** _add after first deploy_
+**Deployed URL:** https://cipherstack-xi.vercel.app
 
 ## Project layout
 

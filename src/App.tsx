@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { base64ToBytes, utf8ToBytes } from './lib/bytes'
-import { getCipher } from './ciphers/registry'
+import { cipherListOrdered, getCipher } from './ciphers/registry'
 import type { CipherConfig } from './ciphers/types'
 import {
   MIN_PIPELINE_NODES,
@@ -19,14 +19,17 @@ const SPAWN_Y0 = 72
 const NODE_H_GAP = 36
 const NODE_V_GAP = 48
 
-/** Sidebar labels match the reference UI; each row adds the mapped cipher. */
-const SIDEBAR_ROWS: { display: string; cipherId: string }[] = [
-  { display: 'AES-256', cipherId: 'caesar' },
-  { display: 'RSA', cipherId: 'vigenere' },
-  { display: 'ChaCha20', cipherId: 'xor_b64' },
-  { display: 'Blowfish', cipherId: 'reverse' },
-  { display: 'Library', cipherId: 'utf8_b64' },
-]
+/** Short node names for the library; falls back to cipher `label`. */
+const NODE_LIBRARY_DISPLAY: Partial<Record<string, string>> = {
+  xor_b64: 'XOR',
+  utf8_b64: 'Base64',
+  reverse: 'Reverse',
+}
+
+const SIDEBAR_ROWS: { display: string; cipherId: string }[] = cipherListOrdered.map((c) => ({
+  display: NODE_LIBRARY_DISPLAY[c.id] ?? c.label,
+  cipherId: c.id,
+}))
 
 type PipelineCanvasNode = PipelineNode & { x: number; y: number }
 
@@ -557,7 +560,7 @@ export default function App() {
       <div className="sanctum-body">
         <aside className="sanctum-sidebar">
           <div className="sanctum-algo-head">
-            <div className="sanctum-algo-title">ALGO_LIBRARY</div>
+            <div className="sanctum-algo-title">Node Library</div>
             <div className="sanctum-algo-ver">V.2.0.4-STABLE</div>
           </div>
           <ul className="sanctum-algo-list">
@@ -643,7 +646,7 @@ export default function App() {
               </svg>
 
               {nodes.length === 0 && (
-                <div className="sanctum-canvas-empty">Choose a module from ALGO_LIBRARY — nodes appear here.</div>
+                <div className="sanctum-canvas-empty">Choose a node from Node Library — nodes appear here.</div>
               )}
 
               {nodes.map((n, i) => {
