@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { cipherListOrdered, getCipher } from './ciphers/registry'
+import { base64ToBytes, utf8ToBytes } from './lib/bytes'
+import { getCipher } from './ciphers/registry'
 import type { CipherConfig } from './ciphers/types'
 import {
   MIN_PIPELINE_NODES,
@@ -9,15 +10,23 @@ import {
   type TraceStep,
 } from './lib/executor'
 
-const NODE_W = 320
-/** Fallback before ResizeObserver measures auto-sized nodes */
-const NODE_H_FALLBACK = 200
-const CANVAS_PAD = 56
-const CANVAS_MIN_H = 400
-const SPAWN_X0 = 64
-const SPAWN_Y0 = 100
-const NODE_H_GAP = 40
-const NODE_V_GAP = 52
+const NODE_W = 300
+const NODE_H_FALLBACK = 220
+const CANVAS_PAD = 48
+const CANVAS_MIN_H = 380
+const SPAWN_X0 = 40
+const SPAWN_Y0 = 72
+const NODE_H_GAP = 36
+const NODE_V_GAP = 48
+
+/** Sidebar labels match the reference UI; each row adds the mapped cipher. */
+const SIDEBAR_ROWS: { display: string; cipherId: string }[] = [
+  { display: 'AES-256', cipherId: 'caesar' },
+  { display: 'RSA', cipherId: 'vigenere' },
+  { display: 'ChaCha20', cipherId: 'xor_b64' },
+  { display: 'Blowfish', cipherId: 'reverse' },
+  { display: 'Library', cipherId: 'utf8_b64' },
+]
 
 type PipelineCanvasNode = PipelineNode & { x: number; y: number }
 
@@ -44,7 +53,6 @@ function bottomOfNodes(nodes: PipelineCanvasNode[], heights: Record<string, numb
   return maxB
 }
 
-/** Place the next node to the right of the last, or start a new row when the canvas is not wide enough. */
 function spawnPosition(
   prev: PipelineCanvasNode[],
   canvasInnerWidth: number,
@@ -62,7 +70,6 @@ function spawnPosition(
   return { x: SPAWN_X0, y: rowBottom + NODE_V_GAP }
 }
 
-/** Swap pipeline slots `left` and `right` (left < right) and exchange their canvas positions. */
 function swapAdjacentPipelineSlots(copy: PipelineCanvasNode[], left: number, right: number) {
   const a = copy[left]!
   const b = copy[right]!
@@ -78,8 +85,41 @@ type Mode = 'encrypt' | 'decrypt'
 
 type DragState = { id: string; offsetX: number; offsetY: number }
 
+function shiftHexLabel(shift: CipherConfig['shift']): string {
+  const n = typeof shift === 'number' ? shift : Number.parseInt(String(shift), 10)
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return '—'
+  const u = ((n % 256) + 256) % 256
+  return `0x${u.toString(16).toUpperCase().padStart(2, '0')}`
+}
+
+function bytesToHexSpaced(bytes: Uint8Array, maxBytes = 20): string {
+  const n = Math.min(bytes.length, maxBytes)
+  const parts: string[] = []
+  for (let i = 0; i < n; i++) {
+    parts.push(bytes[i]!.toString(16).toUpperCase().padStart(2, '0'))
+  }
+  let s = parts.join(' ')
+  if (bytes.length > maxBytes) s += ' …'
+  return s || '—'
+}
+
+function xorOutputHex(s: string): string {
+  const t = s.trim()
+  try {
+    return bytesToHexSpaced(base64ToBytes(t))
+  } catch {
+    return bytesToHexSpaced(utf8ToBytes(t))
+  }
+}
+
+function randomSessionId(): string {
+  const part = () => Math.floor(1000 + Math.random() * 9000)
+  return `${part()}-X99-LAB`
+}
+
 export default function App() {
   const canvasRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const nodeHeightsRef = useRef<Record<string, number>>({})
   const [nodeHeights, setNodeHeights] = useState<Record<string, number>>({})
   const [nodes, setNodes] = useState<PipelineCanvasNode[]>([])
@@ -92,6 +132,10 @@ export default function App() {
   const [stale, setStale] = useState(false)
   const [drag, setDrag] = useState<DragState | null>(null)
   const [reorderMessage, setReorderMessage] = useState<string | null>(null)
+  const [selectedSidebarCipherId, setSelectedSidebarCipherId] = useState(SIDEBAR_ROWS[0]!.cipherId)
+  const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(null)
+  const [sessionId] = useState(randomSessionId)
+  const [copyFlash, setCopyFlash] = useState(false)
 
   const pipeline = useMemo(() => toPipeline(nodes), [nodes])
 
@@ -109,10 +153,11 @@ export default function App() {
 
   const addCipher = useCallback(
     (cipherId: string) => {
+      setSelectedSidebarCipherId(cipherId)
       setNodes((prev) => {
         const innerW =
           canvasRef.current?.clientWidth ??
-          (typeof window !== 'undefined' ? window.innerWidth : 1200)
+          (typeof window !== 'undefined' ? window.innerWidth - 280 : 1200)
         const pos = spawnPosition(prev, innerW, nodeHeightsRef.current)
         return [...prev, { id: newId(), cipherId, config: cloneConfig(cipherId), ...pos }]
       })
@@ -273,11 +318,13 @@ export default function App() {
     })
   }, [])
 
-  const run = useCallback(() => {
+  const applyEncryptRun = useCallback(() => {
+    const t0 = performance.now()
     setStale(false)
     setRunError(null)
-    const input = mode === 'encrypt' ? plaintext : ciphertext
-    const res = mode === 'encrypt' ? runForward(pipeline, input) : runBackward(pipeline, input)
+    setMode('encrypt')
+    const res = runForward(pipeline, plaintext)
+    setLastLatencyMs(Math.round((performance.now() - t0) * 100) / 100)
     if (!res.ok) {
       setTraceByNodeId({})
       setFinalOut(null)
@@ -290,17 +337,40 @@ export default function App() {
     }
     setTraceByNodeId(map)
     setFinalOut(res.finalOutput)
-    if (mode === 'encrypt') {
-      setCiphertext(res.finalOutput)
-    } else {
+    setCiphertext(res.finalOutput)
+  }, [pipeline, plaintext])
+
+  const applyDecryptRun = useCallback(
+    (cipherInput?: string) => {
+      const t0 = performance.now()
+      setStale(false)
+      setRunError(null)
+      setMode('decrypt')
+      const input = (cipherInput ?? ciphertext).trim()
+      const res = runBackward(pipeline, input)
+      setLastLatencyMs(Math.round((performance.now() - t0) * 100) / 100)
+      if (!res.ok) {
+        setTraceByNodeId({})
+        setFinalOut(null)
+        setRunError(res.error)
+        return
+      }
+      const map: Record<string, TraceStep> = {}
+      for (const s of res.steps) {
+        map[s.nodeId] = s
+      }
+      setTraceByNodeId(map)
+      setFinalOut(res.finalOutput)
       setPlaintext(res.finalOutput)
-    }
-  }, [mode, pipeline, plaintext, ciphertext])
+      setCiphertext(input)
+    },
+    [pipeline, ciphertext],
+  )
 
   const validationHint = useMemo(() => {
-    if (nodes.length === 0) return 'Click a cipher in the library to place a node on the canvas.'
+    if (nodes.length === 0) return 'Select an algorithm from the library to place a node.'
     if (nodes.length < MIN_PIPELINE_NODES) {
-      return `Add at least ${MIN_PIPELINE_NODES} nodes (currently ${nodes.length}). Drag nodes to arrange.`
+      return `Add at least ${MIN_PIPELINE_NODES} nodes (currently ${nodes.length}).`
     }
     for (const n of nodes) {
       const def = getCipher(n.cipherId)
@@ -311,16 +381,6 @@ export default function App() {
     return null
   }, [nodes])
 
-  const roundTripOk = useMemo(() => {
-    if (!ciphertext || nodes.length < MIN_PIPELINE_NODES) return null
-    const enc = runForward(pipeline, plaintext)
-    if (!enc.ok) return false
-    if (enc.finalOutput !== ciphertext) return false
-    const dec = runBackward(pipeline, ciphertext)
-    if (!dec.ok) return false
-    return dec.finalOutput === plaintext
-  }, [pipeline, plaintext, ciphertext, nodes.length])
-
   const edgeSegments = useMemo(() => {
     const out: { x1: number; y1: number; x2: number; y2: number; key: string }[] = []
     for (let i = 0; i < nodes.length - 1; i++) {
@@ -330,9 +390,9 @@ export default function App() {
       const hb = nodeHeights[b.id] ?? NODE_H_FALLBACK
       out.push({
         key: `${a.id}-${b.id}`,
-        x1: a.x + NODE_W / 2,
+        x1: a.x + NODE_W,
         y1: a.y + ha / 2,
-        x2: b.x + NODE_W / 2,
+        x2: b.x,
         y2: b.y + hb / 2,
       })
     }
@@ -341,7 +401,7 @@ export default function App() {
 
   const canvasExtent = useMemo(() => {
     if (nodes.length === 0) {
-      return { right: NODE_W + CANVAS_PAD, bottom: CANVAS_MIN_H }
+      return { right: NODE_W * 3 + CANVAS_PAD * 2, bottom: CANVAS_MIN_H }
     }
     let maxBottom = CANVAS_MIN_H
     let maxRight = NODE_W + CANVAS_PAD
@@ -353,359 +413,485 @@ export default function App() {
     return { right: maxRight, bottom: maxBottom }
   }, [nodes, nodeHeights])
 
+  const sequenceText = useMemo(() => {
+    if (nodes.length === 0) return 'SEQUENCE: ···'
+    const labels = nodes.map((n) => {
+      const d = getCipher(n.cipherId)
+      return d ? d.label.toUpperCase() : n.cipherId.toUpperCase()
+    })
+    return `SEQUENCE: ${labels.join(' → ')}`
+  }, [nodes])
+
+  const newPipeline = useCallback(() => {
+    setNodes([])
+    setPlaintext('hello')
+    setCiphertext('')
+    setTraceByNodeId({})
+    setFinalOut(null)
+    setRunError(null)
+    setStale(false)
+    setMode('encrypt')
+  }, [])
+
+  const exportPipeline = useCallback(() => {
+    const payload = {
+      version: 1,
+      nodes: pipeline.map(({ cipherId, config }) => ({ cipherId, config: structuredClone(config) })),
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'sanctum-pipeline.json'
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [pipeline])
+
+  const importPipelineFromJson = useCallback(
+    (text: string) => {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        setRunError('Import failed: invalid JSON.')
+        return
+      }
+      if (!parsed || typeof parsed !== 'object' || !('nodes' in parsed)) {
+        setRunError('Import failed: expected a { nodes: [...] } object.')
+        return
+      }
+      const rawNodes = (parsed as { nodes: unknown }).nodes
+      if (!Array.isArray(rawNodes) || rawNodes.length === 0) {
+        setRunError('Import failed: nodes must be a non-empty array.')
+        return
+      }
+      const innerW =
+        canvasRef.current?.clientWidth ?? (typeof window !== 'undefined' ? window.innerWidth - 280 : 1200)
+      const next: PipelineCanvasNode[] = []
+      for (const item of rawNodes) {
+        if (!item || typeof item !== 'object' || !('cipherId' in item)) {
+          setRunError('Import failed: each node needs cipherId.')
+          return
+        }
+        const cipherId = String((item as { cipherId: unknown }).cipherId)
+        if (!getCipher(cipherId)) {
+          setRunError(`Import failed: unknown cipher “${cipherId}”.`)
+          return
+        }
+        const config =
+          'config' in item && (item as { config: unknown }).config && typeof (item as { config: unknown }).config === 'object'
+            ? structuredClone((item as { config: CipherConfig }).config)
+            : cloneConfig(cipherId)
+        const pos = spawnPosition(next, innerW, {})
+        next.push({ id: newId(), cipherId, config, ...pos })
+      }
+      setNodes(next)
+      clearOutputs()
+      setRunError(null)
+    },
+    [clearOutputs],
+  )
+
+  const onImportFileChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      e.target.value = ''
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = () => {
+        const t = typeof reader.result === 'string' ? reader.result : ''
+        importPipelineFromJson(t)
+      }
+      reader.readAsText(file)
+    },
+    [importPipelineFromJson],
+  )
+
+  const copyResult = useCallback(async () => {
+    const text = finalOut ?? ciphertext
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopyFlash(true)
+      window.setTimeout(() => setCopyFlash(false), 1200)
+    } catch {
+      setRunError('Copy failed (clipboard permission).')
+    }
+  }, [finalOut, ciphertext])
+
+  const nodeAccentClass = (i: number) => {
+    const m = i % 3
+    if (m === 0) return 'sanctum-node--a'
+    if (m === 1) return 'sanctum-node--b'
+    return 'sanctum-node--c'
+  }
+
   return (
-    <main className={`app${drag ? ' app--dragging' : ''}`}>
-      <header className="app-header app-header--compact" data-reveal>
-        <div>
-          <p className="app-kicker" aria-hidden="true">
-            Build · run · trace
-          </p>
-          <h1>CipherStack</h1>
-          <p>
-            Place nodes on the canvas and drag them freely. <strong>Before</strong> / <strong>After</strong>{' '}
-            swap a step with its neighbor in the chain and trade canvas positions. Add more steps from the
-            library above.
-          </p>
-        </div>
+    <div className={`sanctum${drag ? ' sanctum--dragging' : ''}`}>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="application/json,.json"
+        className="sanctum-file-input"
+        aria-hidden
+        tabIndex={-1}
+        onChange={onImportFileChange}
+      />
+
+      <header className="sanctum-topnav">
+        <div className="sanctum-brand">THE_SANCTUM</div>
+        <nav className="sanctum-topnav-center" aria-label="Pipeline">
+          <button type="button" className="sanctum-navlink sanctum-navlink--active" onClick={newPipeline}>
+            NEW PIPELINE
+          </button>
+          <button type="button" className="sanctum-navlink" onClick={() => fileInputRef.current?.click()}>
+            IMPORT
+          </button>
+          <button type="button" className="sanctum-navlink" onClick={exportPipeline}>
+            EXPORT
+          </button>
+        </nav>
+        <div className="sanctum-topnav-spacer" aria-hidden="true" />
       </header>
 
-      <div className="panel panel-top palette-panel" data-reveal>
-        <div className="panel-top-head">
-          <h2>Node library</h2>
-          <span className="panel-top-hint">
-            Click a cipher to add a node · <strong>Before</strong> / <strong>After</strong> reorder adjacent
-            steps (and swap their on-canvas positions). Drag the header only moves a box.
-          </span>
-        </div>
-        <div className="palette-row">
-          {cipherListOrdered.map((c) => (
-            <button
-              key={c.id}
-              type="button"
-              className="palette-chip"
-              onClick={() => addCipher(c.id)}
-            >
-              <span className="palette-chip-label">{c.label}</span>
-              {c.countsAsConfigurable ? (
-                <span className="badge">cfg</span>
-              ) : (
-                <span className="badge extra">extra</span>
-              )}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="panel panel-top io-panel" data-reveal>
-        <div className="io-row">
-          <div className="io-cluster io-cluster--modes">
-            <h2 className="io-inline-title">I/O</h2>
-            <div className="mode-toggle mode-toggle--compact">
-              <button
-                type="button"
-                className={mode === 'encrypt' ? 'active' : ''}
-                onClick={() => setMode('encrypt')}
-              >
-                Encrypt
-              </button>
-              <button
-                type="button"
-                className={mode === 'decrypt' ? 'active' : ''}
-                onClick={() => {
-                  if (mode === 'encrypt') {
-                    setCiphertext('')
-                    clearOutputs()
-                  }
-                  setMode('decrypt')
-                }}
-              >
-                Decrypt
-              </button>
-            </div>
+      <div className="sanctum-body">
+        <aside className="sanctum-sidebar">
+          <div className="sanctum-algo-head">
+            <div className="sanctum-algo-title">ALGO_LIBRARY</div>
+            <div className="sanctum-algo-ver">V.2.0.4-STABLE</div>
           </div>
-
-          <div className="io-cluster io-cluster--grow">
-            <label className="io-inline-label" htmlFor={mode === 'encrypt' ? 'plain' : 'cipher'}>
-              {mode === 'encrypt' ? 'Plaintext' : 'Ciphertext'}
-            </label>
-            {mode === 'encrypt' ? (
-              <textarea
-                id="plain"
-                className="io-text io-text--main"
-                value={plaintext}
-                onChange={(e) => {
-                  const v = e.target.value
-                  setPlaintext(v)
-                  if (v === '') clearOutputs()
-                  else markStale()
-                }}
-                rows={3}
-              />
-            ) : (
-              <textarea
-                id="cipher"
-                className="io-text io-text--main"
-                value={ciphertext}
-                onChange={(e) => {
-                  const v = e.target.value
-                  setCiphertext(v)
-                  if (v === '') clearOutputs()
-                  else markStale()
-                }}
-                rows={3}
-              />
-            )}
-          </div>
-
-          <div className="io-cluster io-cluster--actions">
-            <button type="button" className="btn-run" disabled={!!validationHint} onClick={run}>
-              Run {mode === 'encrypt' ? 'encrypt' : 'decrypt'}
-            </button>
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => {
-                const dec = runBackward(pipeline, ciphertext)
-                if (!dec.ok) {
-                  setRunError(dec.error)
-                  setTraceByNodeId({})
-                  setFinalOut(null)
-                  return
-                }
-                const map: Record<string, TraceStep> = {}
-                for (const s of dec.steps) {
-                  map[s.nodeId] = s
-                }
-                setTraceByNodeId(map)
-                setFinalOut(dec.finalOutput)
-                setPlaintext(dec.finalOutput)
-                setRunError(null)
-                setStale(false)
-                setMode('decrypt')
-              }}
-              disabled={!!validationHint || !ciphertext}
-            >
-              Quick decrypt
-            </button>
-          </div>
-
-          <div className="io-cluster io-cluster--grow">
-            <span className="io-inline-label">Result</span>
-            <textarea
-              className="io-text"
-              readOnly
-              placeholder="Run to see output…"
-              value={finalOut ?? ''}
-              rows={3}
-            />
-          </div>
-
-          {roundTripOk !== null && nodes.length >= MIN_PIPELINE_NODES && (
-            <div className={`io-cluster io-roundtrip ${roundTripOk ? 'ok' : 'bad'}`}>
-              Round-trip: {roundTripOk ? 'PASS' : 'FAIL'}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {(runError || stale || validationHint || reorderMessage) && (
-        <div className="alerts-strip" data-reveal>
-          {runError && <div className="alert warn">{runError}</div>}
-          {stale && !runError && (
-            <div className="alert stale">Config or text changed — run again to refresh traces.</div>
-          )}
-          {validationHint && <div className="alert info">{validationHint}</div>}
-          {reorderMessage && <div className="alert error" role="status">{reorderMessage}</div>}
-        </div>
-      )}
-
-      <section className="panel panel-canvas-wrap" data-reveal>
-        <div className="canvas-head">
-          <h2>Pipeline canvas</h2>
-          <span className="canvas-hint">
-            Drag the header to move a box on the canvas. Arrows follow pipeline order (step 1 → 2 → …).{' '}
-            <strong>Before</strong> / <strong>After</strong> swap with the previous or next step and trade places on
-            the canvas.
-          </span>
-        </div>
-        <div
-          ref={canvasRef}
-          className="canvas"
-          style={{
-            width: `max(100%, ${canvasExtent.right}px)`,
-            height: `${canvasExtent.bottom}px`,
-          }}
-        >
-          <svg
-            className="canvas-edges"
-            aria-hidden="true"
-            width="100%"
-            height="100%"
-            preserveAspectRatio="none"
-          >
-            <defs>
-              <linearGradient id="edgeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                <stop offset="0%" stopColor="#4f46e5" />
-                <stop offset="55%" stopColor="#6366f1" />
-                <stop offset="100%" stopColor="#0d9488" />
-              </linearGradient>
-              <marker
-                id="edge-arrow"
-                viewBox="0 0 10 10"
-                refX="8"
-                refY="5"
-                markerWidth="7"
-                markerHeight="7"
-                orient="auto"
-              >
-                <path d="M 0 0 L 10 5 L 0 10 z" fill="#4f46e5" />
-              </marker>
-            </defs>
-            {edgeSegments.map((seg) => (
-              <line
-                key={seg.key}
-                x1={seg.x1}
-                y1={seg.y1}
-                x2={seg.x2}
-                y2={seg.y2}
-                stroke="url(#edgeGrad)"
-                strokeWidth="2.5"
-                markerEnd="url(#edge-arrow)"
-              />
-            ))}
-          </svg>
-
-          {nodes.length === 0 && (
-            <div className="canvas-empty">Choose a cipher above — it will land here. Add more to link them.</div>
-          )}
-
-          {nodes.map((n, i) => {
-            const def = getCipher(n.cipherId)
-            if (!def) return null
-            const step = traceByNodeId[n.id]
-            const isDragging = drag?.id === n.id
-            return (
-              <article
-                key={n.id}
-                data-node-box={n.id}
-                className={`node-box node-box--canvas${isDragging ? ' node-box--dragging' : ''}`}
-                style={{ left: n.x, top: n.y, width: NODE_W }}
-              >
-                <div
-                  className="node-box-drag"
-                  onPointerDown={(e) => beginDrag(e, n)}
-                  title="Drag to move this box on the canvas only (does not change pipeline order)"
-                >
-                  <strong className="node-box-title">{def.label}</strong>
-                  <span className="node-drag-grip" aria-hidden>
-                    ⠿
-                  </span>
+          <ul className="sanctum-algo-list">
+            {SIDEBAR_ROWS.map((row) => {
+              const active = selectedSidebarCipherId === row.cipherId
+              return (
+                <li key={row.cipherId}>
                   <button
                     type="button"
-                    className="node-box-remove"
-                    title="Remove this step from the pipeline"
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      removeNode(n.id)
-                    }}
+                    className={`sanctum-algo-item${active ? ' sanctum-algo-item--active' : ''}`}
+                    title={`Add ${getCipher(row.cipherId)?.label ?? row.cipherId} node`}
+                    onClick={() => addCipher(row.cipherId)}
                   >
-                    ×
+                    <span className="sanctum-algo-icon" aria-hidden>
+                      ◆
+                    </span>
+                    <span className="sanctum-algo-label">{row.display}</span>
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+          <button type="button" className="sanctum-add-custom" onClick={() => addCipher('reverse')}>
+            ADD CUSTOM NODE
+          </button>
+          <div className="sanctum-sidebar-foot">
+            <button type="button" className="sanctum-settings">
+              <span className="sanctum-settings-ico" aria-hidden>
+                ⚙
+              </span>
+              Settings
+            </button>
+          </div>
+        </aside>
+
+        <main className="sanctum-main">
+          <div className="sanctum-cascade-head">
+            <h1 className="sanctum-cascade-title">CASCADE_PROTOCOL</h1>
+            <p className="sanctum-cascade-sub">{sequenceText}</p>
+          </div>
+
+          {(runError || stale || validationHint || reorderMessage) && (
+            <div className="sanctum-alerts" role="region" aria-label="Status">
+              {runError && <div className="sanctum-alert sanctum-alert--err">{runError}</div>}
+              {stale && !runError && (
+                <div className="sanctum-alert sanctum-alert--stale">Config or text changed — run ENCRYPT/DECRYPT again.</div>
+              )}
+              {validationHint && <div className="sanctum-alert sanctum-alert--info">{validationHint}</div>}
+              {reorderMessage && (
+                <div className="sanctum-alert sanctum-alert--warn" role="status">
+                  {reorderMessage}
+                </div>
+              )}
+            </div>
+          )}
+
+          <section className="sanctum-canvas-panel">
+            <div
+              ref={canvasRef}
+              className="sanctum-canvas"
+              style={{
+                width: `max(100%, ${canvasExtent.right}px)`,
+                height: `${canvasExtent.bottom}px`,
+              }}
+            >
+              <svg
+                className="sanctum-canvas-edges"
+                aria-hidden
+                width="100%"
+                height="100%"
+                preserveAspectRatio="none"
+              >
+                {edgeSegments.map((seg) => (
+                  <line
+                    key={seg.key}
+                    x1={seg.x1}
+                    y1={seg.y1}
+                    x2={seg.x2}
+                    y2={seg.y2}
+                    className="sanctum-edge-line"
+                  />
+                ))}
+              </svg>
+
+              {nodes.length === 0 && (
+                <div className="sanctum-canvas-empty">Choose a module from ALGO_LIBRARY — nodes appear here.</div>
+              )}
+
+              {nodes.map((n, i) => {
+                const def = getCipher(n.cipherId)
+                if (!def) return null
+                const step = traceByNodeId[n.id]
+                const isDragging = drag?.id === n.id
+                const isLast = i === nodes.length - 1
+                const accent = nodeAccentClass(i)
+                const outLabel =
+                  def.id === 'xor_b64' ? 'HEX' : isLast ? 'FINAL' : 'OUT'
+                const secondReadout =
+                  def.id === 'xor_b64' && step
+                    ? xorOutputHex(step.output)
+                    : step
+                      ? step.output
+                      : ''
+
+                return (
+                  <article
+                    key={n.id}
+                    data-node-box={n.id}
+                    className={`sanctum-node ${accent}${isDragging ? ' sanctum-node--dragging' : ''}`}
+                    style={{ left: n.x, top: n.y, width: NODE_W }}
+                  >
+                    <div
+                      className="sanctum-node-drag"
+                      onPointerDown={(e) => beginDrag(e, n)}
+                      title="Drag header to reposition"
+                    >
+                      <span className="sanctum-node-idx">NODE {(i + 1).toString().padStart(2, '0')}</span>
+                      <span className="sanctum-node-name">{def.label.toUpperCase()}</span>
+                      <button
+                        type="button"
+                        className="sanctum-node-remove"
+                        title="Remove node"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          removeNode(n.id)
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <div className="sanctum-node-reorder">
+                      <button type="button" className="sanctum-mini-btn" onClick={() => swapWithPreviousInPipeline(i)}>
+                        ← SWAP
+                      </button>
+                      <button type="button" className="sanctum-mini-btn" onClick={() => swapWithNextInPipeline(i)}>
+                        SWAP →
+                      </button>
+                    </div>
+                    <div className="sanctum-node-body">
+                      <div className="sanctum-node-fields">
+                        {def.id === 'caesar' && (
+                          <div className="sanctum-field">
+                            <label htmlFor={`${n.id}-shift`}>SHIFT PARAM</label>
+                            <div className="sanctum-field-row">
+                              <input
+                                id={`${n.id}-shift`}
+                                type="number"
+                                value={String(n.config.shift ?? '')}
+                                onChange={(e) =>
+                                  updateConfig(n.id, {
+                                    shift: e.target.value === '' ? '' : Number(e.target.value),
+                                  })
+                                }
+                              />
+                              <span className="sanctum-hex-tag">{shiftHexLabel(n.config.shift)}</span>
+                            </div>
+                          </div>
+                        )}
+                        {def.id === 'vigenere' && (
+                          <div className="sanctum-field">
+                            <label htmlFor={`${n.id}-kw`}>KEYPHRASE</label>
+                            <input
+                              id={`${n.id}-kw`}
+                              type="text"
+                              value={String(n.config.keyword ?? '')}
+                              onChange={(e) => updateConfig(n.id, { keyword: e.target.value })}
+                            />
+                          </div>
+                        )}
+                        {def.id === 'xor_b64' && (
+                          <div className="sanctum-field">
+                            <label htmlFor={`${n.id}-key`}>SECRET KEY</label>
+                            <input
+                              id={`${n.id}-key`}
+                              type="text"
+                              value={String(n.config.key ?? '')}
+                              onChange={(e) => updateConfig(n.id, { key: e.target.value })}
+                            />
+                          </div>
+                        )}
+                      </div>
+                      <div className="sanctum-node-io">
+                        <div className="sanctum-io-pair">
+                          <span className="sanctum-io-tag">IN</span>
+                          <div className={`sanctum-io-box${step ? '' : ' sanctum-io-box--empty'}`}>
+                            {step ? step.input : '—'}
+                          </div>
+                        </div>
+                        <div className="sanctum-io-pair">
+                          <span className="sanctum-io-tag">{outLabel}</span>
+                          <div className={`sanctum-io-box${step ? '' : ' sanctum-io-box--empty'}`}>
+                            {step ? secondReadout : '—'}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </article>
+                )
+              })}
+            </div>
+
+            <div className="sanctum-bottom-io">
+              <div className="sanctum-io-panel">
+                <div className="sanctum-io-panel-head sanctum-io-panel-head--left">
+                  <div className="sanctum-io-panel-title sanctum-io-panel-title--green">SYSTEM_INPUT.TXT</div>
+                  <div className="sanctum-io-mode" role="tablist" aria-label="Input type">
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={mode === 'encrypt'}
+                      className={mode === 'encrypt' ? 'active' : ''}
+                      onClick={() => setMode('encrypt')}
+                    >
+                      PLAIN
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={mode === 'decrypt'}
+                      className={mode === 'decrypt' ? 'active' : ''}
+                      onClick={() => setMode('decrypt')}
+                    >
+                      CIPHER
+                    </button>
+                  </div>
+                </div>
+                {mode === 'encrypt' ? (
+                  <textarea
+                    className="sanctum-io-textarea"
+                    value={plaintext}
+                    onChange={(e) => {
+                      const v = e.target.value
+                      setPlaintext(v)
+                      if (v === '') clearOutputs()
+                      else markStale()
+                    }}
+                    spellCheck={false}
+                  />
+                ) : (
+                  <textarea
+                    className="sanctum-io-textarea"
+                    value={ciphertext}
+                    onChange={(e) => {
+                      const v = e.target.value
+                      setCiphertext(v)
+                      if (v === '') clearOutputs()
+                      else markStale()
+                    }}
+                    spellCheck={false}
+                  />
+                )}
+              </div>
+              <div className="sanctum-io-panel sanctum-io-panel--out">
+                <div className="sanctum-io-panel-head">
+                  <div className="sanctum-io-panel-title sanctum-io-panel-title--green">CRYPTED_RESULT.BIN</div>
+                  <button
+                    type="button"
+                    className={`sanctum-copy${copyFlash ? ' sanctum-copy--flash' : ''}`}
+                    onClick={copyResult}
+                    title="Copy output"
+                    aria-label="Copy output"
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+                      <path
+                        d="M8 4v12a2 2 0 002 2h8a2 2 0 002-2V7.5L14.5 4H10a2 2 0 00-2 2z"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                      />
+                      <path
+                        d="M6 8H5a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-1"
+                        stroke="currentColor"
+                        strokeWidth="1.5"
+                      />
+                    </svg>
                   </button>
                 </div>
-                <div className="node-box-nav">
-                  <div
-                    className="node-order-badge"
-                    title="Steps run in this order. Before/After swap with the neighbor step and move both boxes. Drag only moves one box."
-                  >
-                    Pipeline step {i + 1} of {nodes.length}
-                  </div>
-                  <div className="node-box-nav-buttons node-box-nav-buttons--pair">
-                    <button
-                      type="button"
-                      className="node-btn-before"
-                      onClick={() => swapWithPreviousInPipeline(i)}
-                      title="Swap this step with the previous one in the chain and trade canvas positions."
-                    >
-                      Before
-                      <span className="node-btn-sub">swap with previous</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="node-btn-after"
-                      onClick={() => swapWithNextInPipeline(i)}
-                      title="Swap this step with the next one in the chain and trade canvas positions."
-                    >
-                      After
-                      <span className="node-btn-sub">swap with next</span>
-                    </button>
-                  </div>
-                </div>
-                <div className="node-box-body">
-                  <div className="node-box-config">
-                    {def.id === 'caesar' && (
-                      <div className="field field-node">
-                        <label htmlFor={`${n.id}-shift`}>Shift</label>
-                        <input
-                          id={`${n.id}-shift`}
-                          type="number"
-                          value={String(n.config.shift ?? '')}
-                          onChange={(e) =>
-                            updateConfig(n.id, {
-                              shift: e.target.value === '' ? '' : Number(e.target.value),
-                            })
-                          }
-                        />
-                      </div>
-                    )}
-                    {def.id === 'vigenere' && (
-                      <div className="field field-node">
-                        <label htmlFor={`${n.id}-kw`}>Key</label>
-                        <input
-                          id={`${n.id}-kw`}
-                          type="text"
-                          value={String(n.config.keyword ?? '')}
-                          onChange={(e) => updateConfig(n.id, { keyword: e.target.value })}
-                        />
-                      </div>
-                    )}
-                    {def.id === 'xor_b64' && (
-                      <div className="field field-node">
-                        <label htmlFor={`${n.id}-key`}>XOR key</label>
-                        <input
-                          id={`${n.id}-key`}
-                          type="text"
-                          value={String(n.config.key ?? '')}
-                          onChange={(e) => updateConfig(n.id, { key: e.target.value })}
-                        />
-                      </div>
-                    )}
-                  </div>
-                  <div className="node-io">
-                    <div className="node-io-block">
-                      <label className="node-io-label">Input</label>
-                      <div
-                        className={`node-io-readout${step ? '' : ' node-io-readout--empty'}`}
-                        tabIndex={-1}
-                      >
-                        {step ? step.input : 'Run pipeline to populate.'}
-                      </div>
-                    </div>
-                    <div className="node-io-block">
-                      <label className="node-io-label">Output</label>
-                      <div
-                        className={`node-io-readout${step ? '' : ' node-io-readout--empty'}`}
-                        tabIndex={-1}
-                      >
-                        {step ? step.output : 'Run pipeline to populate.'}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </article>
-            )
-          })}
-        </div>
-      </section>
-    </main>
+                <textarea
+                  className="sanctum-io-textarea sanctum-io-textarea--readonly"
+                  readOnly
+                  value={finalOut ?? ''}
+                  placeholder="···"
+                  spellCheck={false}
+                />
+              </div>
+            </div>
+
+            <div className="sanctum-io-actions">
+              <button
+                type="button"
+                className="sanctum-pill sanctum-pill--decrypt"
+                onClick={() => {
+                  if (validationHint) {
+                    setRunError(validationHint)
+                    return
+                  }
+                  const ct = ciphertext.trim() || (finalOut ?? '').trim()
+                  if (!ct) {
+                    setRunError('No ciphertext: run ENCRYPT first or paste ciphertext.')
+                    return
+                  }
+                  applyDecryptRun(ct)
+                }}
+              >
+                DECRYPT
+              </button>
+              <button
+                type="button"
+                className="sanctum-pill sanctum-pill--encrypt"
+                onClick={() => {
+                  if (validationHint) {
+                    setRunError(validationHint)
+                    return
+                  }
+                  applyEncryptRun()
+                }}
+              >
+                ENCRYPT
+              </button>
+            </div>
+
+          </section>
+        </main>
+      </div>
+
+      <footer className="sanctum-statusbar">
+        <span className="sanctum-status-item">
+          <span className="sanctum-status-dot" /> IDLE
+        </span>
+        <span className="sanctum-status-item">
+          ⏱ {lastLatencyMs != null ? `${lastLatencyMs.toFixed(2)}MS` : '—'} LATENCY
+        </span>
+        <span className="sanctum-status-item">⬡ {nodes.length} NODES ACTIVE</span>
+        <span className="sanctum-status-item sanctum-status-session">SECURE SESSION ID: {sessionId}</span>
+      </footer>
+    </div>
   )
 }
